@@ -29,16 +29,17 @@ class BaseQlogFileParser:
     def __init__(self, qlog_file: str):
         self.qlog_file = qlog_file
 
-    def extract_data(self) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    def extract_data(self) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         raise NotImplementedError("Must be implemented by subclasses")
 
     @staticmethod
-    def create_dataframes(packets_list: List[dict], metrics_list: List[dict], offsets_list: List[dict], datagram_list: List[dict]) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    def create_dataframes(packets_list: List[dict], metrics_list: List[dict], offsets_list: List[dict], datagram_list: List[dict], loss_list: List[dict]) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         try:
             df_packets = pd.DataFrame(packets_list)
             df_metrics = pd.DataFrame(metrics_list)
             df_offsets = pd.DataFrame(offsets_list)
             df_datagram = pd.DataFrame(datagram_list)
+            df_losses = pd.DataFrame(loss_list)
 
             if 'packet_number' in df_packets.columns:
                 df_packets['duplicate'] = df_packets.duplicated(
@@ -49,16 +50,16 @@ class BaseQlogFileParser:
                 df_offsets['duplicate'] = df_offsets.duplicated(subset=[
                                                                 'offset'])
 
-            return df_packets, df_metrics, df_offsets, df_datagram
+            return df_packets, df_metrics, df_offsets, df_datagram, df_losses
 
         except Exception as e:
             logging.error(f"Error creating DataFrames: {e}")
-            return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+            return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
 
 class QlogFileParser(BaseQlogFileParser):
-    def extract_data(self) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-        packets_list, metrics_list, offsets_list, datagram_list = [], [], [], []
+    def extract_data(self) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        packets_list, metrics_list, offsets_list, datagram_list, loss_list = [], [], [], [], []
 
         try:
             with open(self.qlog_file, 'r') as json_file:
@@ -69,16 +70,16 @@ class QlogFileParser(BaseQlogFileParser):
 
                 for event in events:
                     self.process_picoquic_event(
-                        event, packet_direction, packets_list, metrics_list, offsets_list, datagram_list)
+                        event, packet_direction, packets_list, metrics_list, offsets_list, datagram_list, loss_list)
 
-            return self.create_dataframes(packets_list, metrics_list, offsets_list, datagram_list)
+            return self.create_dataframes(packets_list, metrics_list, offsets_list, datagram_list, loss_list)
 
         except json.JSONDecodeError as e:
             logging.error(
                 f"Error decoding JSON for file {self.qlog_file}: {e}")
-            return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+            return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-    def process_picoquic_event(self, event: list, packet_direction: str, packets_list: List[dict], metrics_list: List[dict], offsets_list: List[dict], datagram_list: List[dict]):
+    def process_picoquic_event(self, event: list, packet_direction: str, packets_list: List[dict], metrics_list: List[dict], offsets_list: List[dict], datagram_list: List[dict], loss_list: List[dict]):
         if event[1] == 'transport' and event[2] == packet_direction:
             packet_dict = {
                 'time': event[0],
@@ -113,6 +114,18 @@ class QlogFileParser(BaseQlogFileParser):
                 }
                 metrics_list.append(metric_dict)
 
+        if event[1] == 'recovery' and event[2] == 'packet_lost':
+            loss_dict = {
+                'time': event[0],
+                'key': 'packet_lost',
+                'packet_type': event[3]['packet_type'],
+                'packet_number': event[3]['packet_number'],
+                'trigger': event[3]['trigger'],
+                'packet_size': event[3]['header']['packet_size']
+            }
+            loss_list.append(loss_dict)
+
+
     def get_packet_direction(self, role: str) -> str:
         if role == 'server' or role == "quiche-server qlog":
             return 'packet_sent'
@@ -124,8 +137,8 @@ class QlogFileParser(BaseQlogFileParser):
 
 
 class SQlogFileParser(BaseQlogFileParser):
-    def extract_data(self) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-        packets_list, metrics_list, offsets_list, datagram_list = [], [], [], []
+    def extract_data(self) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        packets_list, metrics_list, offsets_list, datagram_list, loss_list = [], [], [], [], []
 
         try:
             with open(self.qlog_file, 'r') as json_file:
@@ -138,16 +151,16 @@ class SQlogFileParser(BaseQlogFileParser):
                     json_object = json_object.strip()
                     if json_object:
                         self.process_quiche_json_object(
-                            json_object, packet_direction, packets_list, metrics_list, offsets_list, datagram_list)
+                            json_object, packet_direction, packets_list, metrics_list, offsets_list, datagram_list, loss_list)
 
-            return self.create_dataframes(packets_list, metrics_list, offsets_list, datagram_list)
+            return self.create_dataframes(packets_list, metrics_list, offsets_list, datagram_list, loss_list)
 
         except json.JSONDecodeError as e:
             logging.error(
                 f"Error decoding JSON for file {self.qlog_file}: {e}")
-            return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+            return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-    def process_quiche_json_object(self, json_object: str, packet_direction: str, packets_list: List[dict], metrics_list: List[dict], offsets_list: List[dict], datagram_list: List[dict]):
+    def process_quiche_json_object(self, json_object: str, packet_direction: str, packets_list: List[dict], metrics_list: List[dict], offsets_list: List[dict], datagram_list: List[dict], loss_list: List[dict]):
         try:
             json_seq = json.loads(json_object)
 
@@ -189,6 +202,15 @@ class SQlogFileParser(BaseQlogFileParser):
                         'value': value
                     }
                     metrics_list.append(metric_dict)
+
+            if json_seq.get('name') == 'recovery:packet_lost':
+                for key in json_seq['data']:
+                    # TODO
+
+                    loss_dict = {
+                        'key': 'packet_lost'
+                    }
+                    loss_list.append(loss_dict)
         except json.JSONDecodeError:
             logging.warning(
                 f"Skipping malformed JSON object: {json_object[:100]}...")
@@ -204,11 +226,12 @@ class SQlogFileParser(BaseQlogFileParser):
 
 
 class QlogDataProcessor:
-    def __init__(self, df_packets: pd.DataFrame, df_metrics: pd.DataFrame, df_offsets: pd.DataFrame, df_datagram: pd.DataFrame, time_interval: str, rolling_window: str):
+    def __init__(self, df_packets: pd.DataFrame, df_metrics: pd.DataFrame, df_offsets: pd.DataFrame, df_datagram: pd.DataFrame, df_losses: pd.DataFrame, time_interval: str, rolling_window: str):
         self.df_packets = df_packets
         self.df_metrics = df_metrics
         self.df_offsets = df_offsets
         self.df_datagram = df_datagram
+        self.df_losses = df_losses
         self.time_interval = time_interval
         self.rolling_window = rolling_window
         self.data_rate_df = pd.DataFrame()
@@ -273,21 +296,22 @@ class QlogDataProcessor:
 
 
 class QlogPlotter:
-    def __init__(self, df_packets: pd.DataFrame, df_metrics: pd.DataFrame, df_offsets: pd.DataFrame, data_rate_df: pd.DataFrame, qlog_file: str):
+    def __init__(self, df_packets: pd.DataFrame, df_metrics: pd.DataFrame, df_offsets: pd.DataFrame, df_losses: pd.DataFrame, data_rate_df: pd.DataFrame, qlog_file: str):
         self.df_packets = df_packets
         self.df_metrics = df_metrics
         self.df_offsets = df_offsets
+        self.df_losses = df_losses
         self.data_rate_df = data_rate_df
         self.qlog_file = qlog_file
 
     def plot_figures(self):
-        sns.set()
+        sns.set_theme()
         plt.rcParams['font.size'] = 10
         qlog_file_name = os.path.basename(os.path.splitext(self.qlog_file)[0])
 
         font_size = 10
         MB = 1000**2
-        fig, ax = plt.subplots(5, 1, figsize=(4, 10), sharex=True)
+        fig, ax = plt.subplots(6, 1, figsize=(4, 10), sharex=True)
 
         for axis in ax:
             axis.grid(True)
@@ -362,7 +386,14 @@ class QlogPlotter:
         ax[4].legend(handles=[line_4_throughput, line_4_goodput],
                      markerscale=10, fontsize=font_size)
         ax[4].set_ylabel("data rate [Mbps]", fontsize=font_size)
-        ax[4].set_xlabel("Time [s]", fontsize=font_size)
+
+        line_5_losses, = ax[5].plot(self.df_losses['time'] / 1e6,
+                                    self.df_losses['packet_size'].cumsum() / MB,
+                                    '-', markersize=1, label="lost bytes")
+        ax[5].legend(handles=[line_5_losses],
+                     markerscale=10, fontsize=font_size)
+        ax[5].set_ylabel("cumulative losses [Bytes]", fontsize=font_size)
+        ax[5].set_xlabel("Time [s]", fontsize=font_size)
         fig.align_ylabels(ax[:])
 
         fig.suptitle(
@@ -384,6 +415,7 @@ class QlogProcessor:
         self.df_metrics = pd.DataFrame()
         self.df_offsets = pd.DataFrame()
         self.df_datagram = pd.DataFrame()
+        self.df_losses = pd.DataFrame()
         self.data_rate_df = pd.DataFrame()
 
     def process_file(self) -> Tuple[str, Union[float, None]]:
@@ -391,18 +423,18 @@ class QlogProcessor:
         start_time = time.time()
 
         parser = self.get_parser()
-        self.df_packets, self.df_metrics, self.df_offsets, self.df_datagram = parser.extract_data()
+        self.df_packets, self.df_metrics, self.df_offsets, self.df_datagram, self.df_losses = parser.extract_data()
 
         if self.df_packets.empty and self.df_metrics.empty and self.df_offsets.empty and self.df_datagram.empty:
             return self.qlog_file, None
 
         data_processor = QlogDataProcessor(
-            self.df_packets, self.df_metrics, self.df_offsets, self.df_datagram, self.time_interval, self.rolling_window)
+            self.df_packets, self.df_metrics, self.df_offsets, self.df_datagram, self.df_losses, self.time_interval, self.rolling_window)
         data_processor.calculate_throughput_and_goodput()
         self.data_rate_df = data_processor.data_rate_df
 
         plotter = QlogPlotter(self.df_packets, self.df_metrics,
-                              self.df_offsets, self.data_rate_df, self.qlog_file)
+                              self.df_offsets, self.df_losses, self.data_rate_df, self.qlog_file)
         fig = plotter.plot_figures()
         self.save_data()
         plotter.save_figures(fig)
@@ -427,6 +459,8 @@ class QlogProcessor:
             f'{self.qlog_file}.datagram.csv', index=False)
         self.df_offsets.to_csv(
             f'{self.qlog_file}.offsets.csv', index=False)
+        self.df_losses.to_csv(
+            f'{self.qlog_file}.losses.csv', index=False)
         self.data_rate_df.columns = [
             'start_interval (s)', 'end_interval (s)', 'throughput (bps)', 'goodput (bps)']
         self.data_rate_df.to_csv(
